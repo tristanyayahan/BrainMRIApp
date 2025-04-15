@@ -142,36 +142,25 @@ def encode_image_with_kdtree(image, block_size=8, cnn_model=None, device=None):
     domain_blocks = range_blocks  # Use same blocks for both to reduce computation
 
     # Extract all features at once in a single batch
-    start_time = time.perf_counter()
     batch_tensor = torch.stack([torch.tensor(b, dtype=torch.float32).unsqueeze(0) for b in domain_blocks]).to(device)
     with torch.no_grad():
         all_features, _ = cnn_model(batch_tensor)
         all_features = all_features.view(all_features.size(0), -1).cpu().numpy()
-    inference_time = round((time.perf_counter() - start_time) * 1000, 4)
 
     # Build KD-tree using domain features
-    start_time = time.perf_counter()
     domain_indices = np.arange(len(domain_blocks))
     kd_tree = build_kdtree(all_features, domain_indices)
-    buildingTree_time = round((time.perf_counter() - start_time) * 1000, 4)
 
     # Search for nearest neighbors
     encoded_data = []
     transformation = (1.0, 0.0, 1, 1)  # Fixed transformation
-    total_search_time = 0
     
-    start_encoding = time.perf_counter()
     for feature in all_features:  # Use pre-computed features
-        search_start = time.perf_counter()
         best_node, _ = find_nearest_in_kdtree(kd_tree, feature)
-        total_search_time += time.perf_counter() - search_start
             
         encoded_data.append((best_node.index, transformation))
 
-    nearestSearch_time = round((total_search_time / len(range_blocks)) * 1000, 4)
-    bps = round(len(range_blocks) / (time.perf_counter() - start_encoding), 4)
-
-    return encoded_data, domain_blocks, bps, buildingTree_time, nearestSearch_time, inference_time
+    return encoded_data, domain_blocks
 
 # Decode the image
 def decode_image(encoded_data, domain_blocks, image_shape, block_size=8, output_file=None, output_path='data/compressed'):
@@ -239,7 +228,7 @@ def run_single_image_compression(original_path, output_path, limit, block_size=8
         image = load_image(image_path)
 
         start_time = time.perf_counter()
-        encoded_data, domain_blocks, _, _, _, _ = encode_image_with_kdtree(image, block_size, cnn_model, device)
+        encoded_data, domain_blocks = encode_image_with_kdtree(image, block_size, cnn_model, device)
         end_time = time.perf_counter()
         encodingTime = round((end_time - start_time), 4)
 

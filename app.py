@@ -1,9 +1,10 @@
 import streamlit as st
+import pandas as pd
 import os
 import time
 import torch
 import gdown
-from file_utils import evaluate_compression
+from file_utils import evaluate_compression, saveCSV, get_FolderName
 from main_script import load_cnn_model, load_image, encode_image_with_kdtree, decode_image
 import base64
 from io import BytesIO
@@ -14,10 +15,6 @@ def get_base64_image(image_path):
     buffered = BytesIO()
     img.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode()
-
-# Paths
-orig_path = "data/original"
-output_path = "data/compressed"
 
 # Initialize session state for navigation
 if "page" not in st.session_state:
@@ -37,54 +34,62 @@ if not os.path.exists(cnn_model_path):
 cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 
 # Compression function
-def compress_and_show_images(uploaded_files, block_size=8):
+def compress_and_show_images(uploaded_files, patient_name, patient_id, block_size=8):
     compressed_files = []
-    os.makedirs(orig_path, exist_ok=True)
+    batch_FolderName = get_FolderName(patient_name, patient_id)
+    orig_data_path = os.path.join("data/original", batch_FolderName)
+    comp_data_path = os.path.join("data/compressed", batch_FolderName)
+    os.makedirs(orig_data_path, exist_ok=True)
 
     for uploaded_file in uploaded_files:
         # Save the original uploaded image with duplicate check
-        image_name = uploaded_file.name
-        base_name, ext = os.path.splitext(image_name)
-        image_path = os.path.join(orig_path, image_name)
+        orig_img_name = uploaded_file.name
+        base_name, ext = os.path.splitext(orig_img_name)
+        orig_img_path = os.path.join(orig_data_path, orig_img_name)
 
         # Check if a file with the same name already exists
         counter = 2
-        while os.path.exists(image_path):
-            image_name = f"{base_name}_{counter}{ext}"
-            image_path = os.path.join(orig_path, image_name)
+        while os.path.exists(orig_img_path):
+            orig_img_name = f"{base_name}_{counter}{ext}"
+            orig_img_path = os.path.join(orig_data_path, orig_img_name)
             counter += 1
 
-        # Save the file
-        with open(image_path, "wb") as f:
+        # Save the original image
+        with open(orig_img_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
 
-
-        image = load_image(image_path)
+        image = load_image(orig_img_path)
         start_time = time.perf_counter()
-        encoded_data, domain_blocks, bps, buildingTree_time, nearestSearch_time, inference_time = encode_image_with_kdtree(
-            image, block_size, cnn_model, device)
-        output_file = os.path.join(output_path, f"compressed_{image_name}")
-        decode_image(encoded_data, domain_blocks, image.shape, block_size, output_file=output_file)
+        encoded_data, domain_blocks = encode_image_with_kdtree(image, block_size, cnn_model, device)
+        comp_img_name = f"compressed_{orig_img_name}"
+        comp_img_path = os.path.join(comp_data_path, comp_img_name)
+        decode_image(encoded_data, domain_blocks, image.shape, block_size, comp_img_path, comp_data_path)
         end_time = time.perf_counter()
+        compression_time = round(end_time - start_time, 4)
 
-        original_size, compressed_size, cr_ratio, _, _ = evaluate_compression(image, image_path, output_file)
+        original_size, compressed_size, cr_ratio, psnr, ssim = evaluate_compression(image, orig_img_path, comp_img_path)
 
         compressed_files.append({
-            "original_image": image_path,
-            "compressed_image": output_file,
-            "compression_time": round(end_time - start_time, 4),
+            "original_image": orig_img_path,
+            "compressed_image": comp_img_path,
+            "compression_time": compression_time,
             "original_size": original_size,
             "compressed_size": compressed_size,
             "cr_ratio": cr_ratio
         })
 
-    return compressed_files
+        saveCSV(
+                batch_FolderName, patient_name, patient_id, orig_img_path, comp_img_path, orig_img_name, comp_img_name,
+                original_size, compressed_size, cr_ratio, psnr, ssim, compression_time, "DataCollection.csv"
+            )
+
+    return compressed_files, batch_FolderName
 
 # ============================================================
 # 🏠 HOME PAGE
 # ============================================================
 if st.session_state.page == "home":
-    st.title("🧠 Brain MRI Compression Tool")
+    st.title("Brain MRI Compression Tool")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -102,122 +107,150 @@ if st.session_state.page == "home":
 # ============================================================
 elif st.session_state.page == "compress":
     st.title("📥 Compress New MRI Image")
+
     if st.button("🔙 Back"):
         go_to("home")
         st.rerun()
 
-    uploaded_files = st.file_uploader("Upload Brain MRI images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+    # Input fields for patient details
+    st.subheader("🔎 Enter Patient Details")
+    patient_name = st.text_input("👤 Patient Name")
+    patient_id = st.text_input("🆔 Patient ID")
 
-    if uploaded_files:
-        st.write(f"Uploaded {len(uploaded_files)} images")
+    # Only show uploader if both fields are filled
+    if patient_name and patient_id:
+        uploaded_files = st.file_uploader(
+            "📤 Upload Brain MRI images", type=["jpg", "jpeg", "png"], accept_multiple_files=True
+        )
 
-        compressed_images_data = compress_and_show_images(uploaded_files)
+        if uploaded_files:
+            st.write(f"✅ Compressing {len(uploaded_files)} images for **{patient_name}** (ID: {patient_id})...")
+            
+            compressed_images_data, batch_FolderName = compress_and_show_images(uploaded_files, patient_name, patient_id)
 
-        for data in compressed_images_data:
-            st.image([data['original_image'], data['compressed_image']], caption=["Original", "Compressed"], width=300)
-            st.write("### Compression Details")
-            st.write(f"**Compression Time**: {data['compression_time']} seconds")
-            st.write(f"**Original Size**: {data['original_size']} KB")
-            st.write(f"**Compressed Size**: {data['compressed_size']} KB")
-            st.write(f"**Compression Ratio**: {data['cr_ratio']}")
-            st.markdown("---")
+            # ✅ Save state first
+            st.session_state.selected_batch = batch_FolderName
+            st.session_state.page = "view_folder"
+
+            # ✅ Add a short delay to ensure filesystem operations are complete
+            time.sleep(0.3)
+
+            # ✅ Only rerun after everything is ready
+            st.rerun()
+
+
+    else:
+        st.info("ℹ️ Please enter both the patient name and ID to proceed.")
+
 
 # ============================================================
-# 📂 VIEW PREVIOUS COMPRESSED DATA PAGE
+# 📂 VIEW PREVIOUS COMPRESSED DATA PAGE | FOLDERS
 # ============================================================
 elif st.session_state.page == "view":
-    st.title("📂 View Previously Compressed Images")
+    st.title("📂 View Previously Compressed Data")
+
     if st.button("🔙 Back"):
+        if "selected_image_details" in st.session_state:
+            del st.session_state.selected_image_details
         go_to("home")
         st.rerun()
 
-    if not os.path.exists(orig_path) or not os.path.exists(output_path):
-        st.warning("No previous data found.")
+    csv_path = "data/csv/DataCollection.csv"
+
+    if not os.path.exists(csv_path):
+        st.warning("No data found.")
     else:
-        original_images = sorted(os.listdir(orig_path))
-        compressed_images = sorted(os.listdir(output_path))
+        df = pd.read_csv(csv_path)
 
-        # Initialize selected image if not already
-        if "selected_image" not in st.session_state:
-            st.session_state.selected_image = None
+        # Unique batch folders
+        unique_batches = df["batch_FolderName"].unique()
 
-        # Display compressed image thumbnails in rows of 5
-        columns = st.columns(5)  # Create 5 columns for a row
-        col_index = 0  # Track which column to use
-
-        for orig_name, comp_name in zip(original_images, compressed_images):
-            orig_full_path = os.path.join(orig_path, orig_name)
-            comp_full_path = os.path.join(output_path, comp_name)
-
-            key = f"click_{comp_name}"  # Unique key per image button
-
-            with columns[col_index].form(key=key):
-                st.markdown(
-                    f"""
-                    <style>
-                        .img-button {{
-                            border: none;
-                            background: none;
-                            padding: 0;
-                        }}
-                        .img-button img {{
-                            width: 100%;
-                            max-width: 120px;
-                            border-radius: 8px;
-                            transition: transform 0.2s ease;
-                        }}
-                        .img-button img:hover {{
-                            transform: scale(1.05);
-                            cursor: pointer;
-                        }}
-                    </style>
-                    <button class="img-button" type="submit">
-                        <img src="data:image/jpeg;base64,{get_base64_image(comp_full_path)}" alt="{comp_name}">
-                    </button>
-                    """,
-                    unsafe_allow_html=True
-                )
-                submitted = st.form_submit_button("Details")
-                if submitted:
-                    st.session_state.selected_image = {
-                        "original": orig_full_path,
-                        "compressed": comp_full_path,
-                        "name": comp_name
-                    }
-
-            col_index += 1
-            # Start a new row after 5 images
-            if col_index == 5:
-                columns = st.columns(5)
-                col_index = 0
+        st.subheader("📁 Select a Patient Folder")
+        for batch in unique_batches:
+            if st.button(f"📂 {batch}"):
+                st.session_state.selected_batch = batch
+                st.session_state.page = "view_folder"
+                st.rerun()
 
 
-        # Display the selected image details
-        if st.session_state.selected_image:
-            st.markdown("---")
-            selected = st.session_state.selected_image
-            st.markdown(f"### 🖼️ {selected['name']} Details")
+# ============================================================
+# 📂 VIEW PREVIOUS COMPRESSED DATA PAGE | MRI IMAGES
+# ============================================================
+elif st.session_state.page == "view_folder":
+    st.title(f"🗂️ Folder: {st.session_state.selected_batch}")
+    
+    if st.button("🔙 Back to Folders"):
+        if "selected_image_details" in st.session_state:
+            del st.session_state.selected_image_details
+        st.session_state.page = "view"
+        st.rerun()
 
-            try:
-                orig_img = load_image(selected["original"])
-                original_size, compressed_size, CR_ratio, _, _ = evaluate_compression(
-                    orig_img, selected["original"], selected["compressed"]
-                )
+    df = pd.read_csv("data/csv/DataCollection.csv")
+    batch_df = df[df["batch_FolderName"] == st.session_state.selected_batch]
 
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.image(selected["original"], caption="Original", width=250)
-                with col2:
-                    st.image(selected["compressed"], caption="Compressed", width=250)
+    columns = st.columns(5)
+    col_index = 0
 
-                st.markdown(f"""
-                - **Original Size**: `{original_size} KB`
-                - **Compressed Size**: `{compressed_size} KB`
-                - **Compression Ratio**: `{CR_ratio}`
-                """)
+    for _, row in batch_df.iterrows():
+        key = f"img_{row['comp_img_name']}"
+        with columns[col_index].form(key=key):
+            st.markdown(
+                f"""
+                <style>
+                    .img-button {{
+                        border: none;
+                        background: none;
+                        padding: 0;
+                    }}
+                    .img-button img {{
+                        width: 100%;
+                        max-width: 120px;
+                        border-radius: 8px;
+                        transition: transform 0.2s ease;
+                    }}
+                    .img-button img:hover {{
+                        transform: scale(1.05);
+                        cursor: pointer;
+                    }}
+                </style>
+                <button class="img-button" type="submit">
+                    <img src="data:image/jpeg;base64,{get_base64_image(row['comp_img_path'])}" alt="{row['comp_img_name']}">
+                </button>
+                """,
+                unsafe_allow_html=True
+            )
+            submitted = st.form_submit_button("Details")
+            if submitted:
+                st.session_state.selected_image_details = row.to_dict()
 
-                if st.button("⬅️ Hide Details"):
-                    st.session_state.selected_image = None
+        col_index += 1
+        if col_index == 5:
+            columns = st.columns(5)
+            col_index = 0
 
-            except Exception as e:
-                st.error(f"Error loading selected image: {e}")
+    # Show details if selected
+    if "selected_image_details" in st.session_state:
+        data = st.session_state.selected_image_details
+        st.markdown("---")
+        st.markdown(f"### 🖼️ {data['comp_img_name']} Details")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(data["orig_img_path"], caption="Original", width=250)
+        with col2:
+            st.image(data["comp_img_path"], caption="Compressed", width=250)
+
+        st.markdown(f"""
+        - **Patient Name**: `{data['patient_name']}`
+        - **Patient ID**: `{data['patient_id']}`
+        - **Original Size**: `{data['original_size']} KB`
+        - **Compressed Size**: `{data['compressed_size']} KB`
+        - **Compression Ratio**: `{data['cr_ratio']}`
+        - **PSNR**: `{data['psnr']} dB`
+        - **SSIM**: `{data['ssim']}`
+        - **Compression Time**: `{data['compression_time']} sec`
+        """)
+
+        if st.button("⬅ Hide Details"):
+            del st.session_state.selected_image_details
+            st.rerun()
