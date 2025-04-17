@@ -259,41 +259,68 @@ elif st.session_state.page == "pacs":
         series_list = get_series_from_study(st.session_state.selected_study)
 
         for series_id in series_list:
-            if st.button(f"📥 Download & Compress Series: {series_id}"):
-                dicom_paths = download_series_dicom(series_id)
-                jpg_paths = convert_dicom_to_jpg(dicom_paths)
+            dicom_paths = download_series_dicom(series_id)
+            jpg_paths = convert_dicom_to_jpg(dicom_paths)
 
-                # Extract patient info from first DICOM
-                try:
-                    ds = pydicom.dcmread(dicom_paths[0])
-                    patient_name = str(ds.PatientName) if "PatientName" in ds else "Unknown"
-                    patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
-                    patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
-                    birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
-                    patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
-                except Exception as e:
-                    st.error(f"Failed to read DICOM metadata: {e}")
-                    patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
+            try:
+                ds = pydicom.dcmread(dicom_paths[0])
+                patient_name = str(ds.PatientName) if "PatientName" in ds else "Unknown"
+                patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
+                patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
+                birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
+                patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
+            except Exception as e:
+                st.error(f"Failed to read DICOM metadata: {e}")
+                patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
 
-                st.success(f"✅ Name: {patient_name}, ID: {patient_id}, Sex: {patient_sex}, Birthdate: {patient_birthdate}")
+            with st.expander(f"📦 Series ID: {series_id}"):
+                st.markdown(f"**👤 Name:** {patient_name}  \n"
+                            f"**🆔 ID:** {patient_id}  \n"
+                            f"**🗓️ Birthdate:** {patient_birthdate}  \n"
+                            f"**🚻 Sex:** {patient_sex}")
+                
+                # Show thumbnails
+                cols = st.columns(min(4, len(jpg_paths)))
+                for i, path in enumerate(jpg_paths):
+                    with cols[i % len(cols)]:
+                        st.image(path, caption=f"Image {i+1}", use_container_width=True)
 
-                compressed_data, folder = compress_and_show_images(
-                    jpg_paths,
-                    patient_name,
-                    patient_id,
-                    patient_birthdate,
-                    patient_sex,
-                    upload_to_pacs=True,
-                    source_dicom_paths=dicom_paths
-                )
-                st.session_state.selected_batch = folder
-                st.session_state.page = "view_folder"
-                st.rerun()
-
+                if st.button(f"📥 Download & Compress This Series", key=series_id):
+                    compressed_data, folder = compress_and_show_images(
+                        jpg_paths,
+                        patient_name,
+                        patient_id,
+                        patient_birthdate,
+                        patient_sex,
+                        upload_to_pacs=True,
+                        source_dicom_paths=dicom_paths
+                    )
+                    st.session_state.selected_batch = folder
+                    st.session_state.page = "view_folder"
+                    st.rerun()
 
 
 # DICOM UPLOAD PAGE
 elif st.session_state.page == "dicom_upload":
+    import pandas as pd
+
+    UID_CSV = "data/csv/processed_uids.csv"
+
+    def load_processed_uids():
+        if not os.path.exists(UID_CSV):
+            return set()
+        df = pd.read_csv(UID_CSV)
+        return set(df['SOPInstanceUID'])
+
+    def save_processed_uids(new_uids):
+        if not os.path.exists(UID_CSV):
+            df = pd.DataFrame(columns=["SOPInstanceUID"])
+        else:
+            df = pd.read_csv(UID_CSV)
+        updated_df = pd.concat([df, pd.DataFrame(new_uids, columns=["SOPInstanceUID"])], ignore_index=True)
+        updated_df.drop_duplicates(inplace=True)
+        updated_df.to_csv(UID_CSV, index=False)
+
     st.title("🧾 Upload DICOM File")
     if st.button("🔙 Back"): go_to("home"); st.rerun()
 
@@ -304,39 +331,61 @@ elif st.session_state.page == "dicom_upload":
         os.makedirs(temp_dir, exist_ok=True)
         dicom_paths = []
 
+        processed_uids = load_processed_uids()
+        new_uids = []
+
         for f in dicom_files:
             file_path = os.path.join(temp_dir, f.name)
             with open(file_path, "wb") as out:
                 out.write(f.read())
-            dicom_paths.append(file_path)
 
-        try:
-            ds = pydicom.dcmread(dicom_paths[0])
-            patient_name = str(ds.PatientName) if "PatientName" in ds else "Unknown"
-            patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
-            patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
-            birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
-            patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
-        except Exception as e:
-            st.error(f"Failed to read DICOM metadata: {e}")
-            patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
+            try:
+                ds = pydicom.dcmread(file_path)
+                sop_uid = str(ds.SOPInstanceUID)
 
-        st.success(f"✅ Patient Name: {patient_name}")
-        st.success(f"✅ Patient ID: {patient_id}")
-        st.success(f"✅ Birthdate: {patient_birthdate}")
-        st.success(f"✅ Sex: {patient_sex}")
+                if sop_uid in processed_uids:
+                    st.warning(f"⚠️ Duplicate file {f.name} (UID: {sop_uid}) skipped.")
+                    continue
+                else:
+                    new_uids.append([sop_uid])
+                    dicom_paths.append(file_path)
+            except Exception as e:
+                st.error(f"❌ Failed to read {f.name}: {e}")
+                continue
 
-        jpg_paths = convert_dicom_to_jpg(dicom_paths)
-        compressed_data, folder = compress_and_show_images(
-            jpg_paths,
-            patient_name,
-            patient_id,
-            patient_birthdate,
-            patient_sex,
-            upload_to_pacs=True,
-            source_dicom_paths=dicom_paths
-        )
+        if not dicom_paths:
+            st.info("No new files to process.")
+        else:
+            try:
+                ds = pydicom.dcmread(dicom_paths[0])
+                patient_name = str(ds.PatientName) if "PatientName" in ds else "Unknown"
+                patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
+                patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
+                birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
+                patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
+            except Exception as e:
+                st.error(f"❌ Failed to read DICOM metadata: {e}")
+                patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
 
-        st.session_state.selected_batch = folder
-        st.session_state.page = "view_folder"
-        st.rerun()
+            st.success(f"✅ Patient Name: {patient_name}")
+            st.success(f"✅ Patient ID: {patient_id}")
+            st.success(f"✅ Birthdate: {patient_birthdate}")
+            st.success(f"✅ Sex: {patient_sex}")
+
+            jpg_paths = convert_dicom_to_jpg(dicom_paths)
+            compressed_data, folder = compress_and_show_images(
+                jpg_paths,
+                patient_name,
+                patient_id,
+                patient_birthdate,
+                patient_sex,
+                upload_to_pacs=True,
+                source_dicom_paths=dicom_paths
+            )
+
+            save_processed_uids(new_uids)
+
+            st.session_state.selected_batch = folder
+            st.session_state.page = "view_folder"
+            st.rerun()
+
