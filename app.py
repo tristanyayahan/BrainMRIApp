@@ -12,7 +12,7 @@ from PIL import Image
 from datetime import datetime
 
 from file_utils import (
-    evaluate_compression, saveCSV, get_FolderName, get_orthanc_studies, create_and_upload_compressed_dicom,
+    evaluate_compression, saveCSV, get_FolderName, get_orthanc_studies, create_and_upload_compressed_dicom, delete_series_from_orthanc,
     get_study_details, get_series_from_study, download_series_dicom, convert_dicom_to_jpg
 )
 from main_script import load_cnn_model, load_image, encode_image_with_kdtree, decode_image
@@ -43,8 +43,8 @@ cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 def compress_and_show_images(uploaded_files, patient_name, patient_id, patient_birthdate="Unknown", patient_sex="Unknown", upload_to_pacs=False, source_dicom_paths=None, block_size=8):
     compressed_files = []
     batch_FolderName = get_FolderName(patient_name, patient_id)
-    orig_data_path = os.path.join("data/original", batch_FolderName)
-    comp_data_path = os.path.join("data/compressed", batch_FolderName)
+    orig_data_path = os.path.join("data/original", f"{patient_name}_{patient_id}", batch_FolderName)
+    comp_data_path = os.path.join("data/compressed", f"{patient_name}_{patient_id}", batch_FolderName)
     os.makedirs(orig_data_path, exist_ok=True)
 
     if isinstance(uploaded_files, str):
@@ -242,21 +242,38 @@ elif st.session_state.page == "view_folder":
 # PACS PAGE
 elif st.session_state.page == "pacs":
     st.title("📡 PACS Import (Orthanc)")
-    if st.button("🔙 Back"): go_to("home"); st.rerun()
 
+    # Back button: reset selected study and go back to home
+    if st.button("🔙 Back"):
+        st.session_state.selected_study = None
+        go_to("home")
+        st.rerun()
+
+    # Initialize selected study state if not set
+    if "selected_study" not in st.session_state:
+        st.session_state.selected_study = None
+
+    # List of studies from Orthanc
     st.subheader("🩺 Available Studies from Orthanc")
     studies = get_orthanc_studies()
     if not studies:
         st.warning("No studies found.")
     else:
         for study_id in studies:
-            if st.button(f"📁 Study ID: {study_id}"):
+            is_selected = st.session_state.selected_study == study_id
+            label = f"{'🔵' if is_selected else '📁'} Study ID: {study_id}"
+            if st.button(label, key=f"study_{study_id}"):
                 st.session_state.selected_study = study_id
                 st.rerun()
 
-    if "selected_study" in st.session_state:
+    # Display series only if a study is selected
+    if st.session_state.selected_study:
         st.subheader(f"📚 Series in Study: {st.session_state.selected_study}")
-        series_list = get_series_from_study(st.session_state.selected_study)
+        try:
+            series_list = get_series_from_study(st.session_state.selected_study)
+        except Exception as e:
+            st.error(f"❌ Failed to fetch series: {e}")
+            st.stop()
 
         for series_id in series_list:
             dicom_paths = download_series_dicom(series_id)
@@ -268,36 +285,77 @@ elif st.session_state.page == "pacs":
                 patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
                 patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
                 birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
-                patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
+                try:
+                    patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") \
+                        if birth_raw and birth_raw.strip() else "Unknown"
+                except Exception:
+                    patient_birthdate = "Unknown"
             except Exception as e:
                 st.error(f"Failed to read DICOM metadata: {e}")
-                patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
+                patient_name = patient_id = patient_sex = patient_birthdate = "Unknown"
 
             with st.expander(f"📦 Series ID: {series_id}"):
-                st.markdown(f"**👤 Name:** {patient_name}  \n"
-                            f"**🆔 ID:** {patient_id}  \n"
-                            f"**🗓️ Birthdate:** {patient_birthdate}  \n"
-                            f"**🚻 Sex:** {patient_sex}")
-                
-                # Show thumbnails
+                st.markdown(
+                    f"**👤 Name:** {patient_name}  \n"
+                    f"**🆔 ID:** {patient_id}  \n"
+                    f"**🗓️ Birthdate:** {patient_birthdate}  \n"
+                    f"**🚻 Sex:** {patient_sex}"
+                )
+
                 cols = st.columns(min(4, len(jpg_paths)))
                 for i, path in enumerate(jpg_paths):
                     with cols[i % len(cols)]:
                         st.image(path, caption=f"Image {i+1}", use_container_width=True)
 
-                if st.button(f"📥 Download & Compress This Series", key=series_id):
-                    compressed_data, folder = compress_and_show_images(
-                        jpg_paths,
-                        patient_name,
-                        patient_id,
-                        patient_birthdate,
-                        patient_sex,
-                        upload_to_pacs=True,
-                        source_dicom_paths=dicom_paths
-                    )
-                    st.session_state.selected_batch = folder
-                    st.session_state.page = "view_folder"
-                    st.rerun()
+                download_key = f"download_{series_id}"
+                delete_key = f"delete_button_{series_id}"
+                confirm_key = f"confirm_delete_{series_id}"
+                yes_key = f"yes_delete_{series_id}"
+                cancel_key = f"cancel_delete_{series_id}"
+
+                col1, col2 = st.columns([1, 1])
+
+                with col1:
+                    if st.button(f"📥 Download & Compress This Series", key=download_key):
+                        compressed_data, folder = compress_and_show_images(
+                            jpg_paths,
+                            patient_name,
+                            patient_id,
+                            patient_birthdate,
+                            patient_sex,
+                            upload_to_pacs=True,
+                            source_dicom_paths=dicom_paths
+                        )
+                        st.session_state.selected_batch = folder
+                        st.session_state.page = "view_folder"
+                        st.rerun()
+
+                with col2:
+                    if confirm_key not in st.session_state:
+                        st.session_state[confirm_key] = False
+
+                    if not st.session_state[confirm_key]:
+                        if st.button(f"🗑️ Delete This Series", key=delete_key):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                    else:
+                        st.warning("⚠️ Are you sure you want to delete this series from the PACS?")
+                        confirm_col1, confirm_col2 = st.columns([1, 1])
+                        with confirm_col1:
+                            if st.button("✅ Yes, Delete", key=yes_key):
+                                success, msg = delete_series_from_orthanc(series_id)
+                                st.session_state[confirm_key] = False
+                                if success:
+                                    st.success(msg)
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with confirm_col2:
+                            if st.button("❌ Cancel", key=cancel_key):
+                                st.session_state[confirm_key] = False
+                                st.rerun()
+
 
 
 # DICOM UPLOAD PAGE
@@ -362,7 +420,11 @@ elif st.session_state.page == "dicom_upload":
                 patient_id = str(ds.PatientID) if "PatientID" in ds else "Unknown"
                 patient_sex = str(ds.PatientSex) if "PatientSex" in ds else "Unknown"
                 birth_raw = str(ds.PatientBirthDate) if "PatientBirthDate" in ds else "Unknown"
-                patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw != "Unknown" else "Unknown"
+                try:
+                    patient_birthdate = datetime.strptime(birth_raw, "%Y%m%d").strftime("%Y-%m-%d") if birth_raw and birth_raw.strip() else "Unknown"
+                except Exception:
+                    patient_birthdate = "Unknown"
+
             except Exception as e:
                 st.error(f"❌ Failed to read DICOM metadata: {e}")
                 patient_name = patient_id = patient_birthdate = patient_sex = "Unknown"
@@ -388,4 +450,3 @@ elif st.session_state.page == "dicom_upload":
             st.session_state.selected_batch = folder
             st.session_state.page = "view_folder"
             st.rerun()
-

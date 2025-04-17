@@ -38,6 +38,18 @@ def download_series_dicom(series_id, download_dir="temp_dicom"):
     
     return image_paths
 
+def delete_series_from_orthanc(series_id, orthanc_url="http://localhost:8042", username=None, password=None):
+    url = f"{orthanc_url}/series/{series_id}"
+    auth = (username, password) if username and password else None
+    try:
+        response = requests.delete(url, auth=auth)
+        if response.status_code == 200:
+            return True, "Series deleted successfully."
+        else:
+            return False, f"Failed to delete series. Status code: {response.status_code}, Message: {response.text}"
+    except Exception as e:
+        return False, f"Exception occurred: {str(e)}"
+
 def convert_dicom_to_jpg(dicom_paths, output_dir="temp_jpg"):
     os.makedirs(output_dir, exist_ok=True)
     jpg_paths = []
