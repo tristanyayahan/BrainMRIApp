@@ -7,6 +7,7 @@ import gdown
 import base64
 import shutil
 import pydicom
+import zipfile
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
@@ -23,8 +24,13 @@ from main_script import load_cnn_model, load_image, encode_image_with_kdtree, de
 if "page" not in st.session_state:
     st.session_state.page = "home"
 
+
+# ----------------------
+# Helper Function
+# ----------------------
 def go_to(page_name):
     st.session_state.page = page_name
+
 
 # ----------------------
 # Load CNN Model
@@ -167,25 +173,57 @@ elif st.session_state.page == "view":
         st.warning("No data found.")
     else:
         df = pd.read_csv(csv_path)
-        unique_batches = df["batch_FolderName"].unique()
-        st.subheader("📁 Select a Patient Folder")
-        for batch in unique_batches:
-            if st.button(f"📂 {batch}"):
-                st.session_state.selected_batch = batch
-                st.session_state.page = "view_folder"
+        patient_groups = df.groupby(["patient_name", "patient_id"])
+
+        st.subheader("👥 Select a Patient")
+        for (name, pid), _ in patient_groups:
+            label = f"👤 {name} (ID: {pid})"
+            if st.button(label, key=f"patient_{pid}_{name}"):
+                st.session_state.selected_patient = {"name": name, "id": pid}
+                st.session_state.page = "view_patient"
                 st.rerun()
 
-# VIEW FOLDER PAGE
-elif st.session_state.page == "view_folder":
-    st.title(f"🗂️ Folder: {st.session_state.selected_batch}")
-    if st.button("🔙 Back to Folders"):
-        if "selected_image_details" in st.session_state:
-            del st.session_state.selected_image_details
+# VIEW FOLDERS (timestamps) FOR PATIENT
+elif st.session_state.page == "view_patient":
+    st.title(f"🧑‍⚕️ Patient: {st.session_state.selected_patient['name']} (ID: {st.session_state.selected_patient['id']})")
+
+    if st.button("🔙 Back to Patient List"):
+        del st.session_state.selected_patient
         st.session_state.page = "view"
         st.rerun()
 
     df = pd.read_csv("data/csv/DataCollection.csv")
-    batch_df = df[df["batch_FolderName"] == st.session_state.selected_batch]
+    patient_df = df[(df["patient_name"] == st.session_state.selected_patient["name"]) &
+                    (df["patient_id"] == st.session_state.selected_patient["id"])]
+
+    unique_folders = patient_df["batch_FolderName"].unique()
+    st.subheader("📁 Select a Folder (Timestamped Batch)")
+    for folder in unique_folders:
+        if st.button(f"📂 {folder}", key=f"folder_{folder}"):
+            st.session_state.selected_batch = folder
+            st.session_state.page = "view_folder"
+            st.rerun()
+
+# VIEW IMAGES FOR PATIENTS (timestamps)
+elif st.session_state.page == "view_folder":
+    if "selected_batch" not in st.session_state or "selected_patient" not in st.session_state:
+        st.error("Missing context. Please select a patient and folder again.")
+        st.stop()
+
+    patient_name = st.session_state.selected_patient["name"]
+    patient_id = st.session_state.selected_patient["id"]
+    batch_name = st.session_state.selected_batch
+
+    st.title(f"🗂️ Folder: {batch_name}")
+
+    if st.button("🔙 Back to Patient Folders"):
+        if "selected_image_details" in st.session_state:
+            del st.session_state.selected_image_details
+        st.session_state.page = "view_patient"
+        st.rerun()
+
+    df = pd.read_csv("data/csv/DataCollection.csv")
+    batch_df = df[df["batch_FolderName"] == batch_name]
 
     columns = st.columns(5)
     col_index = 0
@@ -202,7 +240,9 @@ elif st.session_state.page == "view_folder":
             if submitted:
                 st.session_state.selected_image_details = row.to_dict()
         col_index += 1
-        if col_index == 5: columns = st.columns(5); col_index = 0
+        if col_index == 5:
+            columns = st.columns(5)
+            col_index = 0
 
     if "selected_image_details" in st.session_state:
         data = st.session_state.selected_image_details
@@ -232,12 +272,14 @@ elif st.session_state.page == "view_folder":
             st.rerun()
 
     if st.button("📦 Download All Compressed Images (ZIP)"):
-        folder_path = f"data/compressed/{st.session_state.selected_batch}"
+        folder_path = f"data/compressed/{batch_name}"
         zip_path = shutil.make_archive(folder_path, 'zip', folder_path)
         with open(zip_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode()
             href = f'<a href="data:application/zip;base64,{b64}" download="{os.path.basename(zip_path)}">📥 Click here to download ZIP</a>'
             st.markdown(href, unsafe_allow_html=True)
+
+
 
 # PACS PAGE
 elif st.session_state.page == "pacs":
@@ -316,19 +358,24 @@ elif st.session_state.page == "pacs":
                 col1, col2 = st.columns([1, 1])
 
                 with col1:
-                    if st.button(f"📥 Download & Compress This Series", key=download_key):
-                        compressed_data, folder = compress_and_show_images(
-                            jpg_paths,
-                            patient_name,
-                            patient_id,
-                            patient_birthdate,
-                            patient_sex,
-                            upload_to_pacs=True,
-                            source_dicom_paths=dicom_paths
-                        )
-                        st.session_state.selected_batch = folder
-                        st.session_state.page = "view_folder"
-                        st.rerun()
+                    if st.button(f"📥 Download This Series", key=download_key):
+                        # Download and zip the series DICOM files
+                        zip_filename = f"{series_id}_dicoms.zip"
+                        zip_path = os.path.join("temp_downloads", zip_filename)
+                        os.makedirs("temp_downloads", exist_ok=True)
+
+                        with zipfile.ZipFile(zip_path, 'w') as zipf:
+                            for dicom_file in dicom_paths:
+                                arcname = os.path.basename(dicom_file)
+                                zipf.write(dicom_file, arcname)
+
+                        with open(zip_path, "rb") as f:
+                            st.download_button(
+                                label="⬇️ Click here to download the DICOM series",
+                                data=f,
+                                file_name=zip_filename,
+                                mime="application/zip"
+                            )
 
                 with col2:
                     if confirm_key not in st.session_state:
@@ -447,6 +494,10 @@ elif st.session_state.page == "dicom_upload":
 
             save_processed_uids(new_uids)
 
+            st.session_state.selected_patient = {
+                "name": patient_name,
+                "id": patient_id
+            }
             st.session_state.selected_batch = folder
             st.session_state.page = "view_folder"
             st.rerun()
