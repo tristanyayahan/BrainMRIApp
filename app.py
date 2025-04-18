@@ -11,6 +11,7 @@ import zipfile
 from io import BytesIO
 from PIL import Image
 from datetime import datetime
+import requests
 
 from file_utils import (
     evaluate_compression, saveCSV, get_FolderName, get_orthanc_studies, create_and_upload_compressed_dicom, delete_series_from_orthanc,
@@ -46,20 +47,39 @@ cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 # ----------------------
 # Compression Function
 # ----------------------
-def compress_and_show_images(uploaded_files, patient_name, patient_id, patient_birthdate="Unknown", patient_sex="Unknown", upload_to_pacs=False, source_dicom_paths=None, block_size=8):
+def compress_and_show_images(
+    uploaded_files,
+    patient_name,
+    patient_id,
+    patient_birthdate="Unknown",
+    patient_sex="Unknown",
+    upload_to_pacs=False,
+    source_dicom_paths=None,
+    block_size=8
+):
+
     compressed_files = []
     batch_FolderName = get_FolderName(patient_name, patient_id)
-    orig_data_path = os.path.join("data/original", f"{patient_name}_{patient_id}", batch_FolderName)
-    comp_data_path = os.path.join("data/compressed", f"{patient_name}_{patient_id}", batch_FolderName)
-    os.makedirs(orig_data_path, exist_ok=True)
 
+    # Set up directory paths
+    orig_data_path = os.path.join("data", "original", f"{patient_name}_{patient_id}", batch_FolderName)
+    comp_data_path = os.path.join("data", "compressed", f"{patient_name}_{patient_id}", batch_FolderName)
+    os.makedirs(orig_data_path, exist_ok=True)
+    os.makedirs(comp_data_path, exist_ok=True)
+
+    # Ensure uploaded_files is a list
     if isinstance(uploaded_files, str):
         uploaded_files = [uploaded_files]
 
     for idx, uploaded_file in enumerate(uploaded_files):
+        # Save original image to proper folder
         if isinstance(uploaded_file, str):
-            orig_img_path = uploaded_file
+            if not os.path.exists(uploaded_file):
+                raise FileNotFoundError(f"Image path does not exist: {uploaded_file}")
             orig_img_name = os.path.basename(uploaded_file)
+            dest_img_path = os.path.join(orig_data_path, orig_img_name)
+            shutil.copy(uploaded_file, dest_img_path)
+            orig_img_path = dest_img_path
         else:
             orig_img_name = uploaded_file.name
             base_name, ext = os.path.splitext(orig_img_name)
@@ -74,38 +94,97 @@ def compress_and_show_images(uploaded_files, patient_name, patient_id, patient_b
             with open(orig_img_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
 
+        # Load image for processing
         image = load_image(orig_img_path)
+
+        # Compress image
         start_time = time.perf_counter()
         encoded_data, domain_blocks = encode_image_with_kdtree(image, block_size, cnn_model, device)
-        comp_img_name = f"compressed_{os.path.basename(orig_img_path)}"
+        comp_img_name = f"compressed_{orig_img_name}"
         comp_img_path = os.path.join(comp_data_path, comp_img_name)
         decode_image(encoded_data, domain_blocks, image.shape, block_size, comp_img_path, comp_data_path)
         end_time = time.perf_counter()
-        compression_time = round(end_time - start_time, 4)
 
+        # Evaluate compression metrics
+        compression_time = round(end_time - start_time, 4)
         original_size, compressed_size, cr_ratio, psnr, ssim = evaluate_compression(image, orig_img_path, comp_img_path)
 
-        # Upload to Orthanc as new DICOM
+        # Optionally upload to PACS
         if upload_to_pacs and source_dicom_paths and idx < len(source_dicom_paths):
             try:
                 create_and_upload_compressed_dicom(source_dicom_paths[idx], comp_img_path)
             except Exception as e:
-                print(f"⚠️ PACS upload failed: {e}")
+                print(f"⚠️ PACS upload failed for {source_dicom_paths[idx]}: {e}")
 
+        # Save to CSV
+        saveCSV(
+            batch_FolderName,
+            patient_name,
+            patient_id,
+            orig_img_path,
+            comp_img_path,
+            os.path.basename(orig_img_path),
+            os.path.basename(comp_img_path),
+            original_size,
+            compressed_size,
+            cr_ratio,
+            psnr,
+            ssim,
+            compression_time,
+            "DataCollection.csv",
+            patient_birthdate,
+            patient_sex
+        )
+
+        # Collect for return
         compressed_files.append({
             "original_image": orig_img_path,
             "compressed_image": comp_img_path,
             "compression_time": compression_time,
             "original_size": original_size,
             "compressed_size": compressed_size,
-            "cr_ratio": cr_ratio
+            "cr_ratio": cr_ratio,
+            "psnr": psnr,
+            "ssim": ssim
         })
 
-        saveCSV(batch_FolderName, patient_name, patient_id, orig_img_path, comp_img_path, os.path.basename(orig_img_path),
-                os.path.basename(comp_img_path), original_size, compressed_size, cr_ratio, psnr, ssim,
-                compression_time, "DataCollection.csv", patient_birthdate, patient_sex)
-
     return compressed_files, batch_FolderName
+
+
+# DICOM UPLOAD PAGE
+# Orthanc server settings
+ORTHANC_SERVER_URL = "http://localhost:8042"  # Adjust to your Orthanc server URL
+ORTHANC_DICOM_URL = f"{ORTHANC_SERVER_URL}/instances"  # URL for checking existing DICOM instances
+UID_CSV = "data/csv/processed_uids.csv"
+
+# Function to load processed UIDs
+def load_processed_uids():
+    if not os.path.exists(UID_CSV):
+        return set()
+    df = pd.read_csv(UID_CSV)
+    return set(df['SOPInstanceUID'])
+
+# Function to save processed UIDs
+def save_processed_uids(new_uids):
+    if not os.path.exists(UID_CSV):
+        df = pd.DataFrame(columns=["SOPInstanceUID"])
+    else:
+        df = pd.read_csv(UID_CSV)
+    updated_df = pd.concat([df, pd.DataFrame(new_uids, columns=["SOPInstanceUID"])], ignore_index=True)
+    updated_df.drop_duplicates(inplace=True)
+    updated_df.to_csv(UID_CSV, index=False)
+
+# Function to check if a DICOM exists in Orthanc
+def check_dicom_exists(sop_uid):
+    """Check if the DICOM SOP Instance UID already exists in Orthanc."""
+    response = requests.get(f"{ORTHANC_DICOM_URL}/{sop_uid}")
+    if response.status_code == 200:
+        return True  # DICOM exists in Orthanc
+    elif response.status_code == 404:
+        return False  # DICOM does not exist in Orthanc
+    else:
+        response.raise_for_status()
+
 
 
 def get_base64_image(image_path):
@@ -120,27 +199,29 @@ def get_base64_image(image_path):
 
 # HOME PAGE
 if st.session_state.page == "home":
-    st.title("🧠 Brain MRI Compression Tool")
+    # Centered title
+    st.markdown("<h1 style='text-align: center;'>🧠 Brain MRI Compression Tool</h1>", unsafe_allow_html=True)
 
-    # First row (top)
-    top_col1, top_col2 = st.columns(2)
-    with top_col1:
-        if st.button("📥 Compress New Image"):
-            go_to("compress"); st.rerun()
-    with top_col2:
-        if st.button("📂 View Previous Data"):
+    st.markdown("###")  # Vertical spacing
+
+    # Top buttons centered in one row
+    top_col = st.columns([1, 2, 1])[1]
+    with top_col:
+        if st.button("🧾 Upload DICOM File", use_container_width=True):
+            go_to("dicom_upload"); st.rerun()
+        st.markdown("<br>", unsafe_allow_html=True)  # small spacing
+        if st.button("📡 Import from PACS", use_container_width=True):
+            go_to("pacs"); st.rerun()
+
+    st.markdown("---")  # Divider
+
+    # Bottom button centered
+    st.markdown("###")  # Vertical spacing
+    center_col = st.columns([1, 2, 1])[1]
+    with center_col:
+        if st.button("📂 View Previous Data", use_container_width=True):
             go_to("view"); st.rerun()
 
-    st.markdown("---")  # Optional separator line
-
-    # Second row (bottom)
-    bottom_col1, bottom_col2 = st.columns(2)
-    with bottom_col1:
-        if st.button("📡 Import from PACS"):
-            go_to("pacs"); st.rerun()
-    with bottom_col2:
-        if st.button("🧾 Upload DICOM File"):
-            go_to("dicom_upload"); st.rerun()
 
 
 # COMPRESS IMAGE PAGE
@@ -404,28 +485,8 @@ elif st.session_state.page == "pacs":
                                 st.rerun()
 
 
-
-# DICOM UPLOAD PAGE
+# Function to handle the DICOM upload and compression process
 elif st.session_state.page == "dicom_upload":
-    import pandas as pd
-
-    UID_CSV = "data/csv/processed_uids.csv"
-
-    def load_processed_uids():
-        if not os.path.exists(UID_CSV):
-            return set()
-        df = pd.read_csv(UID_CSV)
-        return set(df['SOPInstanceUID'])
-
-    def save_processed_uids(new_uids):
-        if not os.path.exists(UID_CSV):
-            df = pd.DataFrame(columns=["SOPInstanceUID"])
-        else:
-            df = pd.read_csv(UID_CSV)
-        updated_df = pd.concat([df, pd.DataFrame(new_uids, columns=["SOPInstanceUID"])], ignore_index=True)
-        updated_df.drop_duplicates(inplace=True)
-        updated_df.to_csv(UID_CSV, index=False)
-
     st.title("🧾 Upload DICOM File")
     if st.button("🔙 Back"): go_to("home"); st.rerun()
 
@@ -452,6 +513,10 @@ elif st.session_state.page == "dicom_upload":
                     st.warning(f"⚠️ Duplicate file {f.name} (UID: {sop_uid}) skipped.")
                     continue
                 else:
+                    # Check if the DICOM already exists in Orthanc before uploading
+                    if check_dicom_exists(sop_uid):
+                        st.warning(f"⚠️ DICOM with SOPInstanceUID {sop_uid} already exists in Orthanc.")
+                        continue
                     new_uids.append([sop_uid])
                     dicom_paths.append(file_path)
             except Exception as e:
