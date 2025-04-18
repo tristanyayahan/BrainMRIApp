@@ -1,15 +1,18 @@
-import sys
 import os
 import time
 import torch
-import gdown
+import shutil
 import numpy as np
-from file_utils import evaluate_compression
-from cnn_model import CNNModel
 from skimage import io, img_as_ubyte, transform
 from skimage.exposure import rescale_intensity, is_low_contrast
 from skimage.io import imsave
-from tqdm import tqdm
+from cnn_model.cnn_model import CNNModel
+from scripts.utils.helper import pthFile_check
+from scripts.utils.file_utils import evaluate_compression
+from scripts.utils.file_utils import (
+    evaluate_compression, saveCSV, 
+    get_FolderName, create_and_upload_compressed_dicom
+)
 
 # Load pre-trained MobileNetV2 model for feature extraction
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -189,72 +192,115 @@ def decode_image(encoded_data, domain_blocks, image_shape, block_size=8, output_
     imsave(output_file, reconstructed_image)
 
 
-# Function to compress and evaluate images in a folder using fractal compression
-def run_single_image_compression(original_path, output_path, limit, block_size=8):
-    cnn_model_path = "cnn_model.pth"  # Path to the pre-trained CNN model
+#=======================================================================================================================================
 
-    if not os.path.exists(cnn_model_path):
-        # https://drive.google.com/file/d/1ZEJl6nB2GBOLIuzd3TSWwjVL2Obf-LXW/view?usp=drive_link
-        file_id = "1ZEJl6nB2GBOLIuzd3TSWwjVL2Obf-LXW"
-        print(f"\n\nDownloading the CNN model with extracted features...")
-        gdown.download(f"https://drive.google.com/uc?id={file_id}", cnn_model_path, quiet=False)
-    
-    cnn_model = load_cnn_model(cnn_model_path, device, input_size=block_size)  # Use block_size as input_size
+# ----------------------
+# Compression Function
+# ----------------------
+def compress_and_show_images(
+    uploaded_files,
+    patient_name,
+    patient_id,
+    patient_birthdate="Unknown",
+    patient_sex="Unknown",
+    upload_to_pacs=False,
+    source_dicom_paths=None,
+    block_size=8
+):
+    # ----------------------
+    # Load CNN Model
+    # ----------------------
+    cnn_model_path, device = pthFile_check()
+    cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 
-    image_files = sorted([f for f in os.listdir(original_path) if f.endswith(('.jpg', '.png', '.jpeg'))])
-    print(f"\n\nCompressing {limit} image/s in '{original_path}' using enhanced fractal compression...")
+    compressed_files = []
+    batch_FolderName = get_FolderName(patient_name, patient_id)
 
-    os.makedirs(output_path, exist_ok=True)  # Ensure output directory exists
+    # Set up directory paths
+    orig_data_path = os.path.join("data", "original", f"{patient_name}_{patient_id}", batch_FolderName)
+    comp_data_path = os.path.join("data", "compressed", f"{patient_name}_{patient_id}", batch_FolderName)
+    os.makedirs(orig_data_path, exist_ok=True)
+    os.makedirs(comp_data_path, exist_ok=True)
 
-    processed_count = 0  # Count of newly compressed images
-    compression_data = []  # List to store compression metrics for plotting
-    
-    for image_file in image_files:
-        if processed_count >= limit:
-            break  # Stop when we have compressed 'limit' new images
+    # Ensure uploaded_files is a list
+    if isinstance(uploaded_files, str):
+        uploaded_files = [uploaded_files]
 
-        base_filename = f"_compressed_{os.path.splitext(image_file)[0]}.jpg"
-        output_file = os.path.join(output_path, base_filename)
+    for idx, uploaded_file in enumerate(uploaded_files):
+        # Save original image to proper folder
+        if isinstance(uploaded_file, str):
+            if not os.path.exists(uploaded_file):
+                raise FileNotFoundError(f"Image path does not exist: {uploaded_file}")
+            orig_img_name = os.path.basename(uploaded_file)
+            dest_img_path = os.path.join(orig_data_path, orig_img_name)
+            shutil.copy(uploaded_file, dest_img_path)
+            orig_img_path = dest_img_path
+        else:
+            orig_img_name = uploaded_file.name
+            base_name, ext = os.path.splitext(orig_img_name)
+            orig_img_path = os.path.join(orig_data_path, orig_img_name)
 
-        # Check if the file already exists and generate a new filename with a number
-        counter = 2
-        while os.path.exists(output_file):
-            base_filename = f"_compressed_{os.path.splitext(image_file)[0]}_{counter}.jpg"
-            output_file = os.path.join(output_path, base_filename)
-            counter += 1
+            counter = 2
+            while os.path.exists(orig_img_path):
+                orig_img_name = f"{base_name}_{counter}{ext}"
+                orig_img_path = os.path.join(orig_data_path, orig_img_name)
+                counter += 1
 
-        print(f"[Processing {processed_count+1}/{limit}] {image_file}...")
-        image_path = os.path.join(original_path, image_file)
-        image = load_image(image_path)
+            with open(orig_img_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
+        # Load image for processing
+        image = load_image(orig_img_path)
+
+        # Compress image
         start_time = time.perf_counter()
         encoded_data, domain_blocks = encode_image_with_kdtree(image, block_size, cnn_model, device)
+        comp_img_name = f"compressed_{orig_img_name}"
+        comp_img_path = os.path.join(comp_data_path, comp_img_name)
+        decode_image(encoded_data, domain_blocks, image.shape, block_size, comp_img_path, comp_data_path)
         end_time = time.perf_counter()
-        encodingTime = round((end_time - start_time), 4)
 
-        start_time = time.perf_counter()
-        decode_image(encoded_data, domain_blocks, image.shape, block_size, output_file=output_file, output_path=output_path)
-        end_time = time.perf_counter()
-        decodingTime = round((end_time - start_time), 4)
+        # Evaluate compression metrics
+        compression_time = round(end_time - start_time, 4)
+        original_size, compressed_size, cr_ratio, psnr, ssim = evaluate_compression(image, orig_img_path, comp_img_path)
 
-        # Collect data for graph plotting
-        original_size, compressed_size, cr, psnr, ssim = evaluate_compression(image, image_path, output_file)
+        # Optionally upload to PACS
+        if upload_to_pacs and source_dicom_paths and idx < len(source_dicom_paths):
+            try:
+                create_and_upload_compressed_dicom(source_dicom_paths[idx], comp_img_path)
+            except Exception as e:
+                print(f"⚠️ PACS upload failed for {source_dicom_paths[idx]}: {e}")
 
-        compression_data.append({
-            'Image': image_file,
-            'Encoding Time (s)': encodingTime,
-            'Decoding Time (s)': decodingTime,
-            'Original Size (kB)': original_size,
-            'Compressed Size (kB)': compressed_size,
-            'Compression Ratio': cr,
-            'PSNR (dB)': psnr,
-            'SSIM': ssim
+        # Save to CSV
+        saveCSV(
+            batch_FolderName,
+            patient_name,
+            patient_id,
+            orig_img_path,
+            comp_img_path,
+            os.path.basename(orig_img_path),
+            os.path.basename(comp_img_path),
+            original_size,
+            compressed_size,
+            cr_ratio,
+            psnr,
+            ssim,
+            compression_time,
+            "DataCollection.csv",
+            patient_birthdate,
+            patient_sex
+        )
+
+        # Collect for return
+        compressed_files.append({
+            "original_image": orig_img_path,
+            "compressed_image": comp_img_path,
+            "compression_time": compression_time,
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "cr_ratio": cr_ratio,
+            "psnr": psnr,
+            "ssim": ssim
         })
-        processed_count += 1
 
-    """# Delete the cnn file after processing
-    if os.path.exists(cnn_model_path):
-        os.remove(cnn_model_path)"""
-        
-    print(f"***Finished compressing {limit} image/s***")
-    sys.exit(1)
+    return compressed_files, batch_FolderName

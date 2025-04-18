@@ -1,68 +1,12 @@
 import os
-import csv
+import requests
+import pydicom
 import numpy as np
+import pandas as pd
 from skimage import io
 from skimage.metrics import peak_signal_noise_ratio as psnr, structural_similarity as ssim
 from datetime import datetime
-import requests
-import pydicom
 from PIL import Image
-from io import BytesIO
-import uuid
-import pandas as pd
-
-
-ORTHANC_URL = "http://localhost:8042"
-
-def get_orthanc_studies():
-    response = requests.get(f"{ORTHANC_URL}/studies")
-    return response.json() if response.status_code == 200 else []
-
-def get_study_details(study_id):
-    return requests.get(f"{ORTHANC_URL}/studies/{study_id}").json()
-
-def get_series_from_study(study_id):
-    return get_study_details(study_id).get("Series", [])
-
-def download_series_dicom(series_id, download_dir="temp_dicom"):
-    os.makedirs(download_dir, exist_ok=True)
-    instances = requests.get(f"{ORTHANC_URL}/series/{series_id}").json()["Instances"]
-
-    image_paths = []
-    for instance_id in instances:
-        dicom_bytes = requests.get(f"{ORTHANC_URL}/instances/{instance_id}/file").content
-        dicom_path = os.path.join(download_dir, f"{instance_id}.dcm")
-        with open(dicom_path, "wb") as f:
-            f.write(dicom_bytes)
-        image_paths.append(dicom_path)
-    
-    return image_paths
-
-def delete_series_from_orthanc(series_id, orthanc_url="http://localhost:8042", username=None, password=None):
-    url = f"{orthanc_url}/series/{series_id}"
-    auth = (username, password) if username and password else None
-    try:
-        response = requests.delete(url, auth=auth)
-        if response.status_code == 200:
-            return True, "Series deleted successfully."
-        else:
-            return False, f"Failed to delete series. Status code: {response.status_code}, Message: {response.text}"
-    except Exception as e:
-        return False, f"Exception occurred: {str(e)}"
-
-def convert_dicom_to_jpg(dicom_paths, output_dir="temp_jpg"):
-    os.makedirs(output_dir, exist_ok=True)
-    jpg_paths = []
-
-    for path in dicom_paths:
-        ds = pydicom.dcmread(path)
-        pixel_array = ds.pixel_array
-        image = Image.fromarray(pixel_array)
-        jpg_path = os.path.join(output_dir, f"{uuid.uuid4().hex}.jpg")
-        image.convert("L").save(jpg_path)
-        jpg_paths.append(jpg_path)
-    
-    return jpg_paths
 
 
 def create_and_upload_compressed_dicom(original_dicom_path, compressed_image_path, orthanc_url="http://localhost:8042", username="orthanc", password="orthanc"):
@@ -112,10 +56,8 @@ def evaluate_compression(image, original_image_path, compressed_image_path):
 
     # PSNR and SSIM
     PSNR = round(psnr(original_image, compressed_image, data_range=1.0), 4)
-    #print(f"\tPeak Signal-to-Noise Ratio (PSNR): {PSNR:.2f} dB")
 
     SSIM = round(ssim(original_image, compressed_image, data_range=1.0), 4)
-    #print(f"\tStructural Similarity Index (SSIM): {SSIM:.4f}")
 
     # file sizes
     original_size = os.path.getsize(original_image_path)
