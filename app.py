@@ -6,28 +6,39 @@ from scripts.pages import (
 )
 
 
-# ----------------------
-# Session Initialization
-# ----------------------
-if "page" not in st.session_state:
-    st.session_state.page = "home"
-
-
-# ----------------------
 # Load CNN Model
-# ----------------------
 cnn_model_path, device = pthFile_check()
 cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 
 
+# Browser tab title and icon
+st.set_page_config(
+    page_title="Brain MRI Compression",
+    page_icon="scripts/assets/icon.png",        
+    layout="centered",
+    initial_sidebar_state="auto"
+)
+
+# Session Initialization
+if "page" not in st.session_state:
+    st.session_state.page = "home"
+
 
 # -------------------------------------------
-# PAGES
+#                  PAGES
 # -------------------------------------------
 
 # HOME PAGE
 if st.session_state.page == "home":
     home_page()
+
+# DICOM UPLOAD PAGE
+elif st.session_state.page == "dicom_upload":
+    dicom_upload_page()
+
+# PACS PAGE
+elif st.session_state.page == "pacs":
+    pacs_page()
 
 # VIEW PREVIOUS DATA (FOLDERS)
 elif st.session_state.page == "view":
@@ -40,11 +51,3 @@ elif st.session_state.page == "view_patient":
 # VIEW IMAGES FOR PATIENTS (timestamps)
 elif st.session_state.page == "view_folder":
     view_folder_page()
-
-# PACS PAGE
-elif st.session_state.page == "pacs":
-    pacs_page()
-
-# DICOM UPLOAD PAGE
-elif st.session_state.page == "dicom_upload":
-    dicom_upload_page()

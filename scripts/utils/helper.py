@@ -17,7 +17,7 @@ def go_to(page_name):
 
 def pthFile_check():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    cnn_model_path = "cnn_model.pth"
+    cnn_model_path = "cnn_model/cnn_model.pth"
     if not os.path.exists(cnn_model_path):
         file_id = "1ZEJl6nB2GBOLIuzd3TSWwjVL2Obf-LXW"
         gdown.download(f"https://drive.google.com/uc?id={file_id}", cnn_model_path, quiet=False)
@@ -74,7 +74,7 @@ def get_study_details(study_id):
 def get_series_from_study(study_id):
     return get_study_details(study_id).get("Series", [])
 
-def download_series_dicom(series_id, download_dir="temp_dicom"):
+def download_series_dicom(series_id, download_dir="data/temp_dicom"):
     os.makedirs(download_dir, exist_ok=True)
     instances = requests.get(f"{ORTHANC_SERVER_URL}/series/{series_id}").json()["Instances"]
 
@@ -100,7 +100,7 @@ def delete_series_from_orthanc(series_id, orthanc_url="http://localhost:8042", u
     except Exception as e:
         return False, f"Exception occurred: {str(e)}"
 
-def convert_dicom_to_jpg(dicom_paths, output_dir="temp_jpg"):
+def convert_dicom_to_jpg(dicom_paths, output_dir="data/temp_jpg"):
     os.makedirs(output_dir, exist_ok=True)
     jpg_paths = []
 

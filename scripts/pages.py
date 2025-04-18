@@ -22,7 +22,7 @@ def home_page():
     # Top buttons centered in one row
     top_col = st.columns([1, 2, 1])[1]
     with top_col:
-        if st.button("🧾 Upload DICOM File", use_container_width=True):
+        if st.button("-- SIMULATION --", use_container_width=True):
             go_to("dicom_upload"); st.rerun()
         st.markdown("<br>", unsafe_allow_html=True)  # small spacing
         if st.button("📡 Import from PACS", use_container_width=True):
@@ -283,7 +283,7 @@ def dicom_upload_page():
     dicom_files = st.file_uploader("Select DICOM Files", type=["dcm"], accept_multiple_files=True)
 
     if dicom_files:
-        temp_dir = "temp_dicom_uploads"
+        temp_dir = "data/temp_dicom_uploads"
         os.makedirs(temp_dir, exist_ok=True)
         dicom_paths = []
 
