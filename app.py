@@ -14,7 +14,7 @@ cnn_model = load_cnn_model(cnn_model_path, device, input_size=8)
 # Browser tab title and icon
 st.set_page_config(
     page_title="Brain MRI Compression",
-    page_icon="scripts/assets/icon.png",        
+    page_icon="scripts/assets/icon.ico",        
     layout="centered",
     initial_sidebar_state="auto"
 )
