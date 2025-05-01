@@ -13,6 +13,25 @@ from scripts.utils.helper import (
     get_orthanc_studies, delete_series_from_orthanc, get_series_from_study, download_series_dicom, convert_dicom_to_jpg
 )
 
+def login_page():
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+
+    if not st.session_state.logged_in:
+        st.title("🔐 Login")
+
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+
+        if st.button("Login"):
+            if username == "admin" and password == "admin":
+                st.success("✅ Login successful!")
+                st.session_state.logged_in = True
+                go_to("home"); st.rerun()
+            else:
+                st.error("❌ Invalid credentials. Try again.")
+        st.stop()
+
 def home_page():
     # Centered title
     st.markdown("<h1 style='text-align: center;'>🧠 Brain MRI Compression Tool</h1>", unsafe_allow_html=True)
@@ -31,7 +50,6 @@ def home_page():
     st.markdown("---")  # Divider
 
     # Bottom button centered
-    st.markdown("###")  # Vertical spacing
     center_col = st.columns([1, 2, 1])[1]
     with center_col:
         if st.button("📂 View Previous Data", use_container_width=True):
